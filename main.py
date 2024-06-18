@@ -1,8 +1,7 @@
 import tensorflow as tf
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoTokenizer
 from datasets import load_dataset
 tf.experimental.numpy.experimental_enable_numpy_behavior()
-from transformers import AutoTokenizer
 
 # Load dataset
 dataset = load_dataset("keirp/common_crawl_sample")
@@ -48,26 +47,26 @@ loss_fn = tf.keras.losses.BinaryCrossentropy()
 optimizer = tf.keras.optimizers.Adam()
 
 # Training loop
-num_epochs = 100000
-batch_size = 32
+num_epochs = 3
+batch_size = 4
 
 for epoch in range(num_epochs):
     print(f"Epoch {epoch + 1}/{num_epochs}")
 
     for i in range(0, len(tokenized_datasets['train']), batch_size):
-        batch_inputs = tf.convert_to_tensor(tokenized_datasets['train']['input_ids'][i:i+batch_size])
-        batch_attention_mask = tf.convert_to_tensor(tokenized_datasets['train']['attention_mask'][i:i+batch_size])
+        batch_inputs = tf.convert_to_tensor(tokenized_datasets['train']['input_ids'][i:i+batch_size], dtype=tf.int64)
+        batch_attention_mask = tf.convert_to_tensor(tokenized_datasets['train']['attention_mask'][i:i+batch_size], dtype=tf.int64)
 
         with tf.GradientTape() as tape:
             # Generate output from GPT-2
             gpt_outputs = model_gpt2(input_ids=batch_inputs, attention_mask=batch_attention_mask, return_dict=True)
-            gpt_logits = gpt_outputs.logits.shape[0]  # Get the batch
+            gpt_logits = gpt_outputs.logits
 
             # Example: Using BERT-like filter (replace with your actual filtering logic)
-            filtered_labels = tf.random.uniform((batch_size, 1), minval=0, maxval=1)
+            filtered_labels = tf.random.uniform((batch_size, gpt_logits.shape[-1]), minval=0, maxval=1)
 
             # Concatenate GPT-2 logits and filtered labels for LNNM input
-            lnnm_inputs = tf.concat([gpt_logits, filtered_labels], axis=-1)
+            lnnm_inputs = tf.concat([gpt_logits, tf.expand_dims(filtered_labels, axis=-1)], axis=-1)
 
             # Make predictions with LNNM model
             lnnm_predictions = lnnm_model(lnnm_inputs)
