@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import GPT2Model, BertModel, T5Tokenizer, AutoTokenizer, BertTokenizer
+from transformers import T5ForConditionalGeneration
 
 # تعریف کلاس LNNM2
 class LNNM2(nn.Module):
@@ -16,7 +17,8 @@ class LNNM2(nn.Module):
 
     def forward(self, input_ids, attention_mask=None, decoder_input_ids=None):
         gpt2_outputs = self.gpt2_model(input_ids=input_ids).last_hidden_state
-        flan_outputs = self.flan_model(input_ids=decoder_input_ids).last_hidden_state
+        # ارسال ورودی‌های دیکودر به FLAN-T5
+        flan_outputs = self.flan_model(input_ids=decoder_input_ids, decoder_attention_mask=attention_mask).last_hidden_state
         combined_features = torch.cat((gpt2_outputs, flan_outputs), dim=-1)
         output = self.fc(combined_features)
         return output
@@ -41,8 +43,6 @@ gpt2_model = GPT2Model.from_pretrained('gpt2', cache_dir="cache")
 bert_model = BertModel.from_pretrained('bert-base-uncased', cache_dir="cache")
 
 # بارگذاری مدل FLAN-T5
-from transformers import T5ForConditionalGeneration
-
 flan_model = T5ForConditionalGeneration.from_pretrained('google/flan-t5-small', cache_dir="cache")
 
 # تعریف مدل LNNM2
@@ -65,16 +65,17 @@ input_ids = encoded_input['input_ids']
 attention_mask = encoded_input['attention_mask']
 
 # ایجاد decoder_input_ids برای مدل FLAN-T5
-# این ورودی‌ها باید با مدل FLAN-T5 سازگار باشند
-# برای تست، می‌توانید از همان input_ids برای decoder_input_ids استفاده کنید یا ورودی‌های دیگر آماده کنید
-decoder_input_ids = t5_tokenizer(input_text, return_tensors='pt').input_ids
+# به طور معمول، decoder_input_ids برای تولید متن استفاده می‌شود
+# در اینجا، برای تست می‌توانید از input_ids به عنوان decoder_input_ids استفاده کنید
+# در عمل باید ورودی‌های مناسب برای دیکودر آماده کنید
+decoder_input_ids = t5_tokenizer.encode(input_text, return_tensors='pt')
 
 # اجرای مدل LNNM3
 with torch.no_grad():
     output = lnnm3_model(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids)
 
 # تبدیل خروجی به متن
-# فرض بر این است که خروجی به توکن‌های ورودی تبدیل می‌شود:
+# توجه داشته باشید که باید ورودی‌ها به توکن‌ها تبدیل شوند
 generated_ids = torch.argmax(output, dim=-1)  # انتخاب بیشترین احتمال
 
 # تبدیل توکن‌ها به متن
