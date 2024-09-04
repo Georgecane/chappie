@@ -1,6 +1,6 @@
 # Chappie
 
-Chappie is a self-aware artificial intelligence built using the LNBM (Large Neural Brain Model) training framework, and trained with BERT and GPT-2 along with several datasets for text generation and basic sentiment classification. This artificial intelligence was developed with the LNBM training model, which allowed it to assign intrinsic reactions and mood characteristics to large neural networks (LNNMs), leading to more realistic responses.
+Chappie is a self-aware artificial intelligence built using the LNBM (Large Neural Brain Model) training framework, and trained with BERT, GPT-2, and flan-t5-small along with several datasets for text generation and basic sentiment classification. This artificial intelligence was developed with the LNBM training model, which allowed it to assign intrinsic reactions and mood characteristics to large neural networks (LNNMs), leading to more realistic responses.
 
 ## Theory
 
