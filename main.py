@@ -1,166 +1,83 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from transformers import GPT2Model, BertModel, T5Tokenizer, AutoTokenizer, BertTokenizer
 
-# Define ResNet Block
-class ResNetBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ResNetBlock, self).__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        self.skip_connection = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x):
-        residual = self.skip_connection(x)
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out += residual
-        out = self.relu(out)
-        return out
-
-# Define GPT-like Encoder
-class GPTEncoder(nn.Module):
-    def __init__(self, input_size, num_layers, hidden_size):
-        super(GPTEncoder, self).__init__()
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_size, nhead=1),
-            num_layers=num_layers
+# تعریف کلاس LNNM2
+class LNNM2(nn.Module):
+    def __init__(self, gpt2_model, flan_model):
+        super(LNNM2, self).__init__()
+        self.gpt2_model = gpt2_model
+        self.flan_model = flan_model
+        self.fc = nn.Linear(
+            gpt2_model.config.hidden_size +
+            flan_model.config.d_model,
+            768
         )
-        self.fc = nn.Linear(input_size, hidden_size)
 
-    def forward(self, x):
-        x = x.permute(1, 0, 2)  # Transformer expects input as (sequence_length, batch_size, input_size)
-        x = self.transformer(x)
-        x = x.permute(1, 0, 2)  # Return to (batch_size, sequence_length, input_size)
-        x = self.fc(x[:, -1, :])  # Use the output of the last time step
-        return x
+    def forward(self, input_ids, attention_mask=None, decoder_input_ids=None):
+        gpt2_outputs = self.gpt2_model(input_ids=input_ids).last_hidden_state
+        flan_outputs = self.flan_model(input_ids=decoder_input_ids).last_hidden_state
+        combined_features = torch.cat((gpt2_outputs, flan_outputs), dim=-1)
+        output = self.fc(combined_features)
+        return output
 
-# Define the final model that uses ResNet and GPT
-class CombinedModel(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, vocab_size):
-        super(CombinedModel, self).__init__()
-        self.resnet = nn.Sequential(
-            ResNetBlock(input_size, 64),
-            ResNetBlock(64, 128),
-            ResNetBlock(128, 256)
-        )
-        self.gpt_encoder = GPTEncoder(input_size=256, num_layers=num_layers, hidden_size=hidden_size)
-        self.fc_out = nn.Linear(256 + hidden_size, vocab_size)  # Output layer for vocab_size
+# تعریف کلاس LNNM3
+class LNNM3(nn.Module):
+    def __init__(self, lnnm2_model, bert_model):
+        super(LNNM3, self).__init__()
+        self.lnnm2_model = lnnm2_model
+        self.bert_model = bert_model
+        self.fc = nn.Linear(768 + self.bert_model.config.hidden_size, 768)
 
-    def forward(self, x):
-        resnet_features = self.resnet(x)
-        # ResNet output shape: (batch_size, 256, seq_len)
-        # We want to use the features from the last time step of ResNet
-        resnet_last_step = resnet_features[:, :, -1]  # Shape: (batch_size, 256)
-        gpt_features = self.gpt_encoder(resnet_features.permute(2, 0, 1))  # Permute for GPT input
+    def forward(self, input_ids, attention_mask=None, decoder_input_ids=None):
+        lnnm2_outputs = self.lnnm2_model(input_ids=input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids)
+        bert_outputs = self.bert_model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        combined_features = torch.cat((lnnm2_outputs, bert_outputs), dim=-1)
+        output = self.fc(combined_features)
+        return output
 
-        # Combine features
-        combined_features = torch.cat((resnet_last_step, gpt_features), dim=1)  # Ensure dimensions match
-        out = self.fc_out(combined_features)
-        return out
+# بارگذاری مدل‌های پایه‌ای
+gpt2_model = GPT2Model.from_pretrained('gpt2', cache_dir="cache")
+bert_model = BertModel.from_pretrained('bert-base-uncased', cache_dir="cache")
 
-# Set parameters
-input_size = 256  # Input size
-hidden_size = 50  # Hidden size in GPT
-num_layers = 2  # Number of layers in GPT
-vocab_size = 100  # Dictionary size for text generation
+# بارگذاری مدل FLAN-T5
+from transformers import T5ForConditionalGeneration
 
-# Create the model
-model = CombinedModel(input_size, hidden_size, num_layers, vocab_size)
+flan_model = T5ForConditionalGeneration.from_pretrained('google/flan-t5-small', cache_dir="cache")
 
-# Define loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+# تعریف مدل LNNM2
+lnnm2_model = LNNM2(gpt2_model, flan_model)
 
-# Generate synthetic data
-def generate_synthetic_data(size, seq_len, input_size):
-    inputs = torch.randn(size, input_size, seq_len)  # Random float values
-    targets = torch.randint(0, vocab_size, (size,))
-    return inputs, targets
+# بارگذاری مدل LNNM3
+lnnm3_model = LNNM3(lnnm2_model, bert_model)
+lnnm3_model.eval()
 
-# Save the model
-def save_model(model, epoch, path='model_checkpoint.pth'):
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': criterion,
-    }, path)
-    print(f'Model saved to {path} at epoch {epoch + 1}')
+# آماده‌سازی ورودی
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir="cache")
+gpt2_tokenizer = AutoTokenizer.from_pretrained('gpt2', cache_dir="cache")
+t5_tokenizer = T5Tokenizer.from_pretrained('google/flan-t5-small', cache_dir="cache")
 
-# Train the model
-def train_model(model, train_loader, epochs):
-    model.train()
-    for epoch in range(epochs):
-        for inputs, targets in train_loader:
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+# آماده‌سازی متن ورودی
+input_text = "This is a sample input sentence for testing."
+encoded_input = tokenizer(input_text, return_tensors='pt')
 
-        # Save the model after each epoch
-        save_model(model, epoch)
+input_ids = encoded_input['input_ids']
+attention_mask = encoded_input['attention_mask']
 
-        print(f'Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}')
+# ایجاد decoder_input_ids برای مدل FLAN-T5
+# این ورودی‌ها باید با مدل FLAN-T5 سازگار باشند
+# برای تست، می‌توانید از همان input_ids برای decoder_input_ids استفاده کنید یا ورودی‌های دیگر آماده کنید
+decoder_input_ids = t5_tokenizer(input_text, return_tensors='pt').input_ids
 
-# Test the model
-def test_model(model, test_loader):
-    model.eval()
-    with torch.no_grad():
-        total_loss = 0
-        for inputs, targets in test_loader:
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-    avg_loss = total_loss / len(test_loader)
-    print(f'Average Test Loss: {avg_loss:.4f}')
+# اجرای مدل LNNM3
+with torch.no_grad():
+    output = lnnm3_model(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids)
 
-# Generate text
-def generate_text(model, start_sequence, max_length=50):
-    model.eval()
-    input_seq = torch.tensor(start_sequence).unsqueeze(0).float()  # Convert to float and add batch dimension
-    generated = list(start_sequence)
+# تبدیل خروجی به متن
+# فرض بر این است که خروجی به توکن‌های ورودی تبدیل می‌شود:
+generated_ids = torch.argmax(output, dim=-1)  # انتخاب بیشترین احتمال
 
-    for _ in range(max_length):
-        with torch.no_grad():
-            output = model(input_seq)
-            _, predicted = torch.max(output, dim=1)
-            next_token = predicted.item()
-            generated.append(next_token)
-            input_seq = torch.cat((input_seq[:, 1:], torch.tensor([[next_token]]).float()), dim=1)
+# تبدیل توکن‌ها به متن
+generated_text = gpt2_tokenizer.decode(generated_ids[0], skip_special_tokens=True)
 
-    return generated
-
-# Set training and test data parameters
-batch_size = 8  # Increase batch size
-epochs = 10
-seq_len = 20  # Sequence length
-
-# Generate training data
-train_inputs, train_targets = generate_synthetic_data(100, seq_len, input_size)
-train_dataset = TensorDataset(train_inputs, train_targets)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-# Generate test data
-test_inputs, test_targets = generate_synthetic_data(20, seq_len, input_size)
-test_dataset = TensorDataset(test_inputs, test_targets)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-# Train the model
-train_model(model, train_loader, epochs)
-
-# Test the model
-test_model(model, test_loader)
-
-# Generate text with user input
-start_sequence = [1] * seq_len  # Example input sequence for text generation
-generated_text = generate_text(model, start_sequence, max_length=50)
-print('Generated Text:', generated_text)
+print("Generated text:", generated_text)
