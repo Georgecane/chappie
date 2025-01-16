@@ -1,84 +1,201 @@
 import torch
 import torch.nn as nn
-from transformers import GPT2Model, BertModel, T5Tokenizer, AutoTokenizer, BertTokenizer
-from transformers import T5ForConditionalGeneration
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForSequenceClassification,
+    AutoModelForCausalLM,
+    T5ForConditionalGeneration
+)
+from torch.optim import Adam
+import numpy as np
+from typing import Dict, List, Tuple
+import torch.nn.functional as F
 
-# تعریف کلاس LNNM2
-class LNNM2(nn.Module):
-    def __init__(self, gpt2_model, flan_model):
-        super(LNNM2, self).__init__()
-        self.gpt2_model = gpt2_model
-        self.flan_model = flan_model
-        self.fc = nn.Linear(
-            gpt2_model.config.hidden_size +
-            flan_model.config.d_model,
-            768
+class EmotionalPredictionSynthesizer(nn.Module):
+    def __init__(self, hidden_size: int = 768):
+        super().__init__()
+        self.emotion_embedding = nn.Linear(hidden_size, hidden_size)
+        self.emotion_classifier = nn.Linear(hidden_size, 8)  # 8 basic emotions
+        self.emotion_attention = nn.MultiheadAttention(hidden_size, 8)
+        
+    def forward(self, hidden_states):
+        emotion_embeds = self.emotion_embedding(hidden_states)
+        attention_output, _ = self.emotion_attention(
+            emotion_embeds, 
+            emotion_embeds, 
+            emotion_embeds
         )
+        emotion_scores = self.emotion_classifier(attention_output)
+        return emotion_scores, attention_output
 
-    def forward(self, input_ids, attention_mask=None, decoder_input_ids=None):
-        gpt2_outputs = self.gpt2_model(input_ids=input_ids).last_hidden_state
-        # ارسال ورودی‌های دیکودر به FLAN-T5
-        flan_outputs = self.flan_model(input_ids=decoder_input_ids, decoder_attention_mask=attention_mask).last_hidden_state
-        combined_features = torch.cat((gpt2_outputs, flan_outputs), dim=-1)
-        output = self.fc(combined_features)
-        return output
+class SelfTuningNetwork(nn.Module):
+    def __init__(self, input_size: int):
+        super().__init__()
+        self.adaptation_layer = nn.Linear(input_size, input_size)
+        self.performance_tracker = []
+        self.learning_rate = 0.001
+        
+    def forward(self, x):
+        adapted_features = self.adaptation_layer(x)
+        return adapted_features
+    
+    def adjust_parameters(self, performance_metric):
+        self.performance_tracker.append(performance_metric)
+        if len(self.performance_tracker) > 10:
+            if performance_metric < np.mean(self.performance_tracker[-10:]):
+                self.learning_rate *= 0.95
 
-# تعریف کلاس LNNM3
-class LNNM3(nn.Module):
-    def __init__(self, lnnm2_model, bert_model):
-        super(LNNM3, self).__init__()
-        self.lnnm2_model = lnnm2_model
-        self.bert_model = bert_model
-        self.fc = nn.Linear(768 + self.bert_model.config.hidden_size, 768)
+class ResNetBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv1d(channels, channels, 3, padding=1)
+        self.conv2 = nn.Conv1d(channels, channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm1d(channels)
+        self.bn2 = nn.BatchNorm1d(channels)
+        
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        return F.relu(out)
 
-    def forward(self, input_ids, attention_mask=None, decoder_input_ids=None):
-        lnnm2_outputs = self.lnnm2_model(input_ids=input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids)
-        bert_outputs = self.bert_model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        combined_features = torch.cat((lnnm2_outputs, bert_outputs), dim=-1)
-        output = self.fc(combined_features)
-        return output
+class ChappieIntegratedModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Initialize base models
+        self.bert = AutoModelForSequenceClassification.from_pretrained("bert-base-uncased")
+        self.gpt2 = AutoModelForCausalLM.from_pretrained("gpt2")
+        self.t5 = T5ForConditionalGeneration.from_pretrained("google/flan-t5-small")
+        
+        # Initialize tokenizers
+        self.tokenizers = {
+            'bert': AutoTokenizer.from_pretrained("bert-base-uncased"),
+            'gpt2': AutoTokenizer.from_pretrained("gpt2"),
+            't5': AutoTokenizer.from_pretrained("google/flan-t5-small")
+        }
+        
+        # Initialize LNBM components
+        self.eps = EmotionalPredictionSynthesizer()
+        self.self_tuning = SelfTuningNetwork(768)  # 768 is BERT's hidden size
+        
+        # ResNet blocks for feature enhancement
+        self.resnet_blocks = nn.ModuleList([
+            ResNetBlock(768) for _ in range(3)
+        ])
+        
+        # Integration layers
+        self.integration_layer = nn.Linear(768 * 3, 768)  # Combines BERT, GPT-2, and T5
+        self.final_layer = nn.Linear(768, 768)
+        
+    def process_input(self, text: str) -> Dict[str, torch.Tensor]:
+        # Process input through all models
+        encodings = {}
+        for model_name, tokenizer in self.tokenizers.items():
+            encodings[model_name] = tokenizer(
+                text, 
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512
+            )
+        return encodings
+    
+    def forward(self, text: str) -> Dict[str, torch.Tensor]:
+        encodings = self.process_input(text)
+        
+        # Get embeddings from each model
+        bert_output = self.bert(**encodings['bert']).hidden_states
+        gpt2_output = self.gpt2(**encodings['gpt2']).hidden_states
+        t5_output = self.t5.encoder(**encodings['t5']).last_hidden_state
+        
+        # Apply ResNet blocks to each embedding
+        for resnet_block in self.resnet_blocks:
+            bert_output = resnet_block(bert_output)
+            gpt2_output = resnet_block(gpt2_output)
+            t5_output = resnet_block(t5_output)
+        
+        # Combine embeddings
+        combined_features = torch.cat([bert_output, gpt2_output, t5_output], dim=-1)
+        integrated_features = self.integration_layer(combined_features)
+        
+        # Apply self-tuning
+        tuned_features = self.self_tuning(integrated_features)
+        
+        # Process through EPS
+        emotion_scores, emotion_context = self.eps(tuned_features)
+        
+        # Final processing
+        output_features = self.final_layer(emotion_context)
+        
+        return {
+            'emotion_scores': emotion_scores,
+            'features': output_features,
+            'bert_output': bert_output,
+            'gpt2_output': gpt2_output,
+            't5_output': t5_output
+        }
+    
+    def optimize_weights(self):
+        """Weight optimization using the self-tuning network"""
+        optimizer = Adam(self.parameters(), lr=self.self_tuning.learning_rate)
+        
+        def optimization_step(batch_loss):
+            optimizer.zero_grad()
+            batch_loss.backward()
+            optimizer.step()
+            
+            # Update self-tuning parameters
+            self.self_tuning.adjust_parameters(batch_loss.item())
+    
+        return optimization_step
+    
+class ChappieTrainer:
+    def __init__(self, model: ChappieIntegratedModel):
+        self.model = model
+        self.optimization_step = model.optimize_weights()
+        
+    def train_step(self, batch: Dict[str, torch.Tensor]):
+        outputs = self.model(batch['input_text'])
+        loss = self.calculate_loss(outputs, batch)
+        self.optimization_step(loss)
+        return loss.item()
+    
+    def calculate_loss(self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
+        # Implement custom loss calculation combining all aspects
+        emotion_loss = F.cross_entropy(outputs['emotion_scores'], batch['emotion_labels'])
+        feature_loss = F.mse_loss(outputs['features'], batch['target_features'])
+        return emotion_loss + feature_loss    
 
-# بارگذاری مدل‌های پایه‌ای
-gpt2_model = GPT2Model.from_pretrained('gpt2', cache_dir="cache")
-bert_model = BertModel.from_pretrained('bert-base-uncased', cache_dir="cache")
 
-# بارگذاری مدل FLAN-T5
-flan_model = T5ForConditionalGeneration.from_pretrained('google/flan-t5-small', cache_dir="cache")
+def main():
+    # Initialize the model
+    chappie = ChappieIntegratedModel()
+    trainer = ChappieTrainer(chappie)
+    
+    # Example usage
+    text = "I am feeling happy today!"
+    outputs = chappie(text)
+    
+    # Access different outputs
+    emotion_scores = outputs['emotion_scores']
+    features = outputs['features']
+    
+    # Export to ONNX
+    dummy_input = "This is a test input"
+    torch.onnx.export(
+        chappie,
+        dummy_input,
+        "chappie_full.onnx",
+        input_names=["text"],
+        output_names=["emotion_scores", "features"],
+        dynamic_axes={
+            "text": {0: "batch_size"},
+            "emotion_scores": {0: "batch_size"},
+            "features": {0: "batch_size"}
+        },
+        opset_version=12
+    )
 
-# تعریف مدل LNNM2
-lnnm2_model = LNNM2(gpt2_model, flan_model)
-
-# بارگذاری مدل LNNM3
-lnnm3_model = LNNM3(lnnm2_model, bert_model)
-lnnm3_model.eval()
-
-# آماده‌سازی ورودی
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir="cache")
-gpt2_tokenizer = AutoTokenizer.from_pretrained('gpt2', cache_dir="cache")
-t5_tokenizer = T5Tokenizer.from_pretrained('google/flan-t5-small', cache_dir="cache")
-
-# آماده‌سازی متن ورودی
-input_text = "This is a sample input sentence for testing."
-encoded_input = tokenizer(input_text, return_tensors='pt')
-
-input_ids = encoded_input['input_ids']
-attention_mask = encoded_input['attention_mask']
-
-# ایجاد decoder_input_ids برای مدل FLAN-T5
-# به طور معمول، decoder_input_ids برای تولید متن استفاده می‌شود
-# در اینجا، برای تست می‌توانید از input_ids به عنوان decoder_input_ids استفاده کنید
-# در عمل باید ورودی‌های مناسب برای دیکودر آماده کنید
-decoder_input_ids = t5_tokenizer.encode(input_text, return_tensors='pt')
-
-# اجرای مدل LNNM3
-with torch.no_grad():
-    output = lnnm3_model(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids)
-
-# تبدیل خروجی به متن
-# توجه داشته باشید که باید ورودی‌ها به توکن‌ها تبدیل شوند
-generated_ids = torch.argmax(output, dim=-1)  # انتخاب بیشترین احتمال
-
-# تبدیل توکن‌ها به متن
-generated_text = gpt2_tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
-print("Generated text:", generated_text)
+if __name__ == "__main__":
+    main()
