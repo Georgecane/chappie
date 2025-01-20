@@ -299,7 +299,11 @@ class ChappieIntegratedModel(nn.Module):
             'loss': loss,
         }, checkpoint_path)
         logger.info(f"Checkpoint saved at {checkpoint_path}")
-
+        
+    def export_model(self, export_path: str):
+        """Exports the model to the specified path."""
+        torch.save(self.state_dict(), export_path)
+        logger.info(f"Model exported to {export_path}")
 
 class ChappieTrainer:
     def __init__(self, model: ChappieIntegratedModel, config: Config):
@@ -308,6 +312,20 @@ class ChappieTrainer:
         self.optimizer = Adam(model.parameters(), lr=config.learning_rate)
         self.best_loss = float('inf')
         
+    def train(self, train_dataloader):
+        for epoch in range(self.config.num_epochs):
+            total_loss = 0
+            for batch in train_dataloader:
+                loss = self.train_step(batch)
+                total_loss += loss
+            
+            avg_loss = total_loss / len(train_dataloader)
+            logger.info(f"Epoch {epoch + 1}/{self.config.num_epochs}, Loss: {avg_loss:.4f}")
+            
+            # Save checkpoint every 100 epochs
+            if (epoch + 1) % 100 == 0:
+                self.model.save_checkpoint(epoch + 1, self.optimizer, avg_loss)
+                
     def train_step(self, batch: Dict[str, torch.Tensor]):
         self.model.train()
         self.optimizer.zero_grad()
@@ -360,6 +378,9 @@ def main():
         
         # Save initial checkpoint
         model.save_checkpoint(0, trainer.optimizer, 0.0)
+        
+        # Export the trained model
+        model.export_model(os.path.join(config.checkpoint_dir, "chappie_model.pt"))
         
     except Exception as e:
         logger.error(f"Error during processing: {str(e)}")
