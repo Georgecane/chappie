@@ -378,3 +378,4 @@ class ChappieConfig:
 def get_default_config() -> ChappieConfig:
     """Get default configuration."""
     return ChappieConfig()
+
