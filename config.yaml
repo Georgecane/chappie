@@ -9,7 +9,7 @@ num_decisions: 4
 cnn_filters: 128
 cnn_kernels: [3, 4, 5]
 compile_model: true
-compile_mode: "inductor"
+compile_mode: "max-autotune"
 suppress_compile_errors: true  # Fall back to eager mode if compilation fails
 
 # Training configuration
