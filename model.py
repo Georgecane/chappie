@@ -630,7 +630,7 @@ class EnhancedChappie(nn.Module):
 
         return x
 
-    def forward(self, input_ids, attention_mask, labels=None, sentence=None) -> Dict[str, Any]:
+    def forward(self, input_ids, attention_mask, labels=None, sentence=None, label=None) -> Dict[str, Any]:
         """Forward pass through the model with optimized execution."""
         # Ensure inputs are on the correct device
         if sentence is not None and input_ids is None:

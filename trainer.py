@@ -304,7 +304,7 @@ def main(config_path=None):
             padding='max_length',
             max_length=128
         )
-        encodings['labels'] = examples['label']
+        encodings['labels'] = examples['labels']
         return encodings
 
     processed_dataset = dataset.map(preprocess, batched=True)
