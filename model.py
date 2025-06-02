@@ -452,6 +452,7 @@ class DecisionEngine(nn.Module):
 class TextCNN(nn.Module):
     def __init__(self, hidden_size: int, filters: list, kernels: list, num_classes: int):
         super().__init__()
+        self.kernels = kernels
         self.convs = nn.ModuleList([
             nn.Conv1d(in_channels=hidden_size, out_channels=f, kernel_size=k)
             for f, k in zip(filters, kernels)
@@ -460,6 +461,12 @@ class TextCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.transpose(1, 2)  # (batch, hidden_size, seq_len)
+        max_k = max(self.kernels)                 # <-- این قسمت اضافه شده
+        seq_len = x.size(2)
+        if seq_len < max_k:
+            pad_len = max_k - seq_len
+            x = F.pad(x, (0, pad_len), "constant", 0)
+        
         pooled = []
         for conv in self.convs:
             conv_out = F.relu(conv(x))  # (batch, f, seq_len - k + 1)
