@@ -5,19 +5,17 @@ import numpy as np
 import argparse
 import logging
 from pathlib import Path
-from transformers import (
-    Trainer,
-    TrainingArguments,
-    AutoTokenizer,
-    EarlyStoppingCallback,
-    get_linear_schedule_with_warmup,
-    get_cosine_schedule_with_warmup
-)
+from transformers import AutoTokenizer
+from transformers.trainer import Trainer
+from transformers.training_args import TrainingArguments
+from transformers.trainer_callback import EarlyStoppingCallback
+from transformers.optimization import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from datasets import load_dataset
 from evaluate import load as load_metric
 from model import EnhancedChappie, get_device
 from config import ChappieConfig, ModelConfig, TrainingConfig
-from torch.amp import autocast, GradScaler
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm

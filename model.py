@@ -148,9 +148,10 @@ def get_device() -> torch.device:
             # Enable PyTorch 2.0 features if available
             if hasattr(torch, '_inductor'):
                 try:
-                    torch._inductor.config.coordinate_descent_tuning = True
-                    torch._inductor.config.triton.unique_kernel_names = False
-                    torch._inductor.config.fx_graph_cache = True
+                    if hasattr(torch._inductor, 'config'):
+                        torch._inductor.config.coordinate_descent_tuning = True
+                        torch._inductor.config.triton.unique_kernel_names = False
+                        torch._inductor.config.fx_graph_cache = True
                     logger.info("Enabled PyTorch 2.0 inductor optimizations")
                 except AttributeError:
                     logger.debug("Some PyTorch 2.0 inductor options not available")
@@ -159,9 +160,9 @@ def get_device() -> torch.device:
             logger.warning("Some optimization modules not available")
             # Set basic thread settings
             import multiprocessing
+            import os
             cpu_count = multiprocessing.cpu_count()
             torch.set_num_threads(cpu_count)
-            torch.set_num_threads(os.cpu_count() if hasattr(os, 'cpu_count') else 4)
         except Exception as e:
             logger.warning(f"Error configuring CPU optimizations: {e}")
 
@@ -548,11 +549,14 @@ class EnhancedChappie(nn.Module):
             try:
                 import torch._dynamo
                 if hasattr(torch._dynamo, 'config'):
-                    torch._dynamo.config.suppress_errors = True
+                    if hasattr(torch._dynamo.config, 'suppress_errors'):
+                        torch._dynamo.config.suppress_errors = True
                     # Set optimization level for better performance
-                    torch._dynamo.config.optimize_ddp = True
+                    if hasattr(torch._dynamo.config, 'optimize_ddp'):
+                        torch._dynamo.config.optimize_ddp = True
                     # Increase cache size for better performance with repeated operations
-                    torch._dynamo.config.cache_size_limit = 512
+                    if hasattr(torch._dynamo.config, 'cache_size_limit'):
+                        torch._dynamo.config.cache_size_limit = 512
                     logger.info("Configured PyTorch to suppress compilation errors and fall back to eager mode")
             except (ImportError, AttributeError):
                 logger.warning("Could not configure error suppression for torch.compile")
@@ -655,12 +659,12 @@ class EnhancedChappie(nn.Module):
         attention_mask = self._ensure_tensor_device(attention_mask)
         labels = self._ensure_tensor_device(labels)
 
-        # Use torch.autocast for mixed precision if on CUDA
+        # Use torch.amp.autocast for mixed precision if on CUDA
         # This significantly speeds up computation on GPU
-        if hasattr(torch, 'autocast') and self.device.type == 'cuda':
-            context_manager = torch.autocast(device_type='cuda')
-        elif hasattr(torch, 'cpu') and hasattr(torch.cpu, 'amp') and hasattr(torch.cpu.amp, 'autocast') and self.device.type == 'cpu':
-            context_manager = torch.cpu.amp.autocast()
+        if hasattr(torch.amp, 'autocast_mode') and self.device.type == 'cuda':
+            context_manager = torch.amp.autocast_mode.autocast(device_type='cuda')
+        elif hasattr(torch.amp, 'autocast_mode') and self.device.type == 'cpu':
+            context_manager = torch.amp.autocast_mode.autocast(device_type='cpu')
         else:
             context_manager = torch.no_grad()
 

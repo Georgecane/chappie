@@ -35,14 +35,15 @@ def check_nvidia_gpu_status():
     logger.info(f"PyTorch built with CUDA support: {cuda_built}")
 
     # Check CUDA version if available
-    if hasattr(torch.version, 'cuda'):
+    if hasattr(torch.version, 'cuda') and torch.version.cuda:
         logger.info(f"PyTorch CUDA version: {torch.version.cuda}")
     else:
         logger.info("PyTorch CUDA version: Not available")
 
     if torch.cuda.is_available():
         # Get CUDA version
-        logger.info(f"CUDA version: {torch.version.cuda}")
+        if hasattr(torch.version, 'cuda') and torch.version.cuda:
+            logger.info(f"CUDA version: {torch.version.cuda}")
 
         # Get device count
         device_count = torch.cuda.device_count()
@@ -234,15 +235,16 @@ def test_model_on_device(device_name=None, use_compilation=False, batch_size=2, 
     try:
         # Set up mixed precision if requested
         if use_amp and device.type == 'cuda':
-            amp_context = torch.amp.autocast(device_type='cuda')
+            amp_context = torch.amp.autocast_mode.autocast(device_type='cuda')
         elif use_amp and device.type == 'cpu':
-            amp_context = torch.amp.autocast(device_type='cpu')
+            amp_context = torch.amp.autocast_mode.autocast(device_type='cpu')
         else:
             amp_context = torch.no_grad()
 
         # Time the forward passes
         import time
         start_time = time.time()
+        outputs = None
 
         with amp_context:
             for i in range(num_iterations):
@@ -257,17 +259,21 @@ def test_model_on_device(device_name=None, use_compilation=False, batch_size=2, 
         ms_per_iteration = 1000 * elapsed_time / num_iterations
 
         # Check outputs from the last iteration
-        logger.info(f"Performance test successful!")
+        logger.info("Model performance test successful!")
         logger.info(f"Total time: {elapsed_time:.4f} seconds for {num_iterations} iterations")
         logger.info(f"Speed: {iterations_per_second:.2f} iterations/second ({ms_per_iteration:.2f} ms/iteration)")
         logger.info(f"Output shapes:")
-        logger.info(f"  - logits: {outputs['logits'].shape}")
-        logger.info(f"  - decisions: {outputs['decisions'].shape}")
-        logger.info(f"  - memory_context: {outputs['memory_context'].shape}")
+        if outputs is not None:
+            logger.info(f"  - logits: {outputs['logits'].shape}")
+            logger.info(f"  - decisions: {outputs['decisions'].shape}")
+            logger.info(f"  - memory_context: {outputs['memory_context'].shape}")
 
         # Clean up to free memory
         if optimize_memory and device.type == 'cuda':
-            del model, input_ids, attention_mask, labels, outputs
+            if outputs is not None:
+                del model, input_ids, attention_mask, labels, outputs
+            else:
+                del model, input_ids, attention_mask, labels
             torch.cuda.empty_cache()
             logger.info("Cleared CUDA cache")
 
@@ -311,7 +317,7 @@ def test_mixed_precision(batch_size=4, seq_length=32, num_iterations=10, optimiz
     model = EnhancedChappie(config)
     model.to('cuda')
     model.train()  # Set to training mode for this test
-    logger.info(f"Model initialized and moved to CUDA")
+    logger.info("Model initialized and moved to CUDA")
 
     # Create dummy inputs
     input_ids = torch.randint(0, 1000, (batch_size, seq_length), device='cuda')
@@ -319,7 +325,8 @@ def test_mixed_precision(batch_size=4, seq_length=32, num_iterations=10, optimiz
     labels = torch.zeros(batch_size, dtype=torch.long, device='cuda')
 
     # Initialize optimizer and scaler
-    from torch.amp import autocast, GradScaler
+    from torch.amp.autocast_mode import autocast
+    from torch.amp.grad_scaler import GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     scaler = GradScaler()
 
@@ -376,7 +383,8 @@ def test_mixed_precision(batch_size=4, seq_length=32, num_iterations=10, optimiz
         logger.info(f"Mixed precision performance test successful!")
         logger.info(f"Total time: {elapsed_time:.4f} seconds for {num_iterations} iterations")
         logger.info(f"Training speed: {iterations_per_second:.2f} iterations/second ({ms_per_iteration:.2f} ms/iteration)")
-        logger.info(f"Final loss: {loss.item():.4f}")
+        if outputs is not None and outputs.loss is not None:
+            logger.info(f"Final loss: {outputs.loss.item():.4f}")
 
         # Compare with FP32 performance (single iteration)
         logger.info("Running single FP32 iteration for comparison...")
