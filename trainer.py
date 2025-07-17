@@ -21,6 +21,7 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
+import gc
 
 # Configure logging
 logging.basicConfig(
@@ -43,6 +44,25 @@ def compute_metrics(p):
         )['matthews_correlation']
     }
 
+def filter_batch_for_model(batch):
+    """Filter batch to only include arguments expected by the model."""
+    expected_keys = {'input_ids', 'attention_mask', 'labels', 'sentence', 'label'}
+    return {k: v for k, v in batch.items() if k in expected_keys}
+
+def clear_memory():
+    """Clear GPU memory cache."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+def get_memory_usage():
+    """Get current GPU memory usage."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        cached = torch.cuda.memory_reserved() / 1024**3     # GB
+        return allocated, cached
+    return 0.0, 0.0
+
 def get_scheduler(optimizer, scheduler_type, num_warmup_steps, num_training_steps):
     """Get the appropriate learning rate scheduler."""
     if scheduler_type == "linear":
@@ -63,6 +83,19 @@ def get_scheduler(optimizer, scheduler_type, num_warmup_steps, num_training_step
 def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
     """Custom training loop with Automatic Mixed Precision."""
     logger.info(f"Starting custom AMP training loop on device: {device}")
+
+    # Clear memory before starting
+    clear_memory()
+
+    # Monitor initial memory usage
+    if torch.cuda.is_available():
+        allocated, cached = get_memory_usage()
+        logger.info(f"Initial GPU memory: {allocated:.2f} GB allocated, {cached:.2f} GB cached")
+
+    # Enable gradient checkpointing for memory efficiency
+    if hasattr(model.backbone, 'gradient_checkpointing_enable'):
+        model.backbone.gradient_checkpointing_enable()
+        logger.info("Enabled gradient checkpointing for memory efficiency")
 
     # Ensure model is on the correct device
     model = model.to(device)
@@ -113,8 +146,53 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
         # Training step
         for step, batch in enumerate(progress_bar):
             try:
-                # Move batch to device safely
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                # Debug logging for first batch
+                if step == 0:
+                    logger.info("Debug - Original batch keys and types:")
+                    for k, v in batch.items():
+                        if isinstance(v, torch.Tensor):
+                            logger.info(f"  {k}: {type(v)} {v.dtype} {v.shape}")
+                        else:
+                            logger.info(f"  {k}: {type(v)}")
+
+                # Filter batch to only include expected model arguments
+                batch = filter_batch_for_model(batch)
+
+                # Debug logging for filtered batch
+                if step == 0:
+                    logger.info("Debug - Filtered batch keys and types:")
+                    for k, v in batch.items():
+                        if isinstance(v, torch.Tensor):
+                            logger.info(f"  {k}: {type(v)} {v.dtype} {v.shape}")
+                        else:
+                            logger.info(f"  {k}: {type(v)}")
+
+                # Convert to proper tensor types and move to device safely
+                processed_batch = {}
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        # Ensure proper dtype for different keys
+                        if k in ['input_ids', 'attention_mask']:
+                            processed_batch[k] = v.long().to(device)
+                        elif k == 'labels':
+                            processed_batch[k] = v.long().to(device)
+                        else:
+                            processed_batch[k] = v.to(device)
+                    elif isinstance(v, list) and k == 'labels':
+                        # Convert list of labels to tensor
+                        processed_batch[k] = torch.tensor(v, dtype=torch.long, device=device)
+                    elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], list):
+                        # Handle nested lists (like input_ids, attention_mask)
+                        processed_batch[k] = torch.tensor(v, dtype=torch.long, device=device)
+                    else:
+                        processed_batch[k] = v
+
+                batch = processed_batch
+
+                # Memory monitoring before forward pass
+                if step % 50 == 0 and torch.cuda.is_available():
+                    allocated, cached = get_memory_usage()
+                    logger.debug(f"Step {step} GPU memory: {allocated:.2f} GB allocated, {cached:.2f} GB cached")
 
                 # Forward pass with mixed precision if available
                 if use_amp:
@@ -151,10 +229,27 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
                 total_loss += loss.item() * config.training.gradient_accumulation_steps
                 progress_bar.set_postfix({"loss": total_loss / (step + 1)})
 
+                # Clear memory periodically to prevent accumulation
+                if step % 100 == 0:
+                    clear_memory()
+
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logger.error(f"CUDA out of memory at step {step}: {e}")
+                    logger.info("Clearing GPU cache and skipping batch...")
+                    clear_memory()
+                    # Skip this batch and continue
+                    continue
+                else:
+                    logger.error(f"Runtime error during training step: {e}")
+                    continue
             except Exception as e:
                 logger.error(f"Error during training step: {e}")
                 # Skip this batch and continue
                 continue
+
+        # Clear memory before evaluation
+        clear_memory()
 
         # Evaluation step
         model.eval()
@@ -165,6 +260,9 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
         with torch.no_grad():
             for batch in tqdm(eval_dataloader, desc="Evaluating"):
                 try:
+                    # Filter batch to only include expected model arguments
+                    batch = filter_batch_for_model(batch)
+
                     # Move batch to device safely
                     batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
@@ -181,6 +279,15 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
                     eval_preds.append(outputs['logits'].cpu().numpy())
                     eval_labels.append(batch['labels'].cpu().numpy())
 
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.error(f"CUDA out of memory during evaluation: {e}")
+                        logger.info("Clearing GPU cache and skipping evaluation batch...")
+                        clear_memory()
+                        continue
+                    else:
+                        logger.error(f"Runtime error during evaluation step: {e}")
+                        continue
                 except Exception as e:
                     logger.error(f"Error during evaluation step: {e}")
                     # Skip this batch and continue
@@ -265,6 +372,14 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
     except Exception as e:
         logger.error(f"Error loading best model: {e}")
 
+    # Final memory cleanup
+    clear_memory()
+
+    # Report final memory usage
+    if torch.cuda.is_available():
+        allocated, cached = get_memory_usage()
+        logger.info(f"Final GPU memory: {allocated:.2f} GB allocated, {cached:.2f} GB cached")
+
     return model, best_metric
 
 def main(config_path=None):
@@ -298,16 +413,27 @@ def main(config_path=None):
     # Preprocess dataset
     logger.info("Preprocessing dataset")
     def preprocess(examples):
+        # Tokenize the sentences
         encodings = tokenizer(
             examples['sentence'],
             truncation=True,
             padding='max_length',
-            max_length=128
+            max_length=128,
+            return_tensors=None  # Return as lists, not tensors
         )
-        encodings['labels'] = examples['label']
-        return encodings
 
-    processed_dataset = dataset.map(preprocess, batched=True)
+        # Convert to proper types
+        return {
+            'input_ids': encodings['input_ids'],  # Already lists of integers
+            'attention_mask': encodings['attention_mask'],  # Already lists of integers
+            'labels': examples['label']  # Already list of integers
+        }
+
+    processed_dataset = dataset.map(
+        preprocess,
+        batched=True,
+        remove_columns=dataset['train'].column_names  # Remove original columns to avoid conflicts
+    )
 
     # Initialize model
     logger.info("Initializing model")
@@ -317,16 +443,35 @@ def main(config_path=None):
     if config.training.fp16 and torch.cuda.is_available():
         logger.info("Using custom AMP training loop")
 
-        # Create data loaders
+        # Create data loaders with custom collate function
+        def collate_fn(batch):
+            """Custom collate function to ensure proper tensor types."""
+            # Extract keys
+            keys = batch[0].keys()
+
+            # Create batch dict
+            batch_dict = {}
+            for key in keys:
+                if key in ['input_ids', 'attention_mask', 'labels']:
+                    # Convert to tensors with proper dtype
+                    batch_dict[key] = torch.tensor([item[key] for item in batch], dtype=torch.long)
+                else:
+                    # Keep other data as is
+                    batch_dict[key] = [item[key] for item in batch]
+
+            return batch_dict
+
         train_dataloader = DataLoader(
             processed_dataset['train'],
             batch_size=config.training.per_device_train_batch_size,
-            shuffle=True
+            shuffle=True,
+            collate_fn=collate_fn
         )
 
         eval_dataloader = DataLoader(
             processed_dataset['validation'],
-            batch_size=config.training.per_device_eval_batch_size
+            batch_size=config.training.per_device_eval_batch_size,
+            collate_fn=collate_fn
         )
 
         # Train with custom AMP loop

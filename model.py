@@ -3,8 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoConfig
-from typing import Dict, Any, Optional, Union, List, Tuple
-from collections import deque
+from typing import Dict, Any
 import logging
 import os
 
@@ -39,7 +38,6 @@ def get_device() -> torch.device:
             # Try to get driver version
             try:
                 import subprocess
-                import re
                 import platform
 
                 if platform.system() == "Windows":
@@ -114,11 +112,15 @@ def get_device() -> torch.device:
 
             # Log CPU information
             import platform
-            import psutil
+            try:
+                import psutil
+                logger.info(f"CPU: {platform.processor()}")
+                logger.info(f"Physical cores: {psutil.cpu_count(logical=False)}")
+                logger.info(f"Logical cores: {psutil.cpu_count(logical=True)}")
+            except ImportError:
+                logger.info(f"CPU: {platform.processor()}")
+                logger.info(f"CPU cores: {physical_cores}")
 
-            logger.info(f"CPU: {platform.processor()}")
-            logger.info(f"Physical cores: {psutil.cpu_count(logical=False)}")
-            logger.info(f"Logical cores: {psutil.cpu_count(logical=True)}")
             logger.info(f"PyTorch threads: {torch.get_num_threads()}")
             logger.info(f"PyTorch interop threads: {torch.get_num_interop_threads()}")
 
@@ -145,14 +147,20 @@ def get_device() -> torch.device:
 
             # Enable PyTorch 2.0 features if available
             if hasattr(torch, '_inductor'):
-                torch._inductor.config.coordinate_descent_tuning = True
-                torch._inductor.config.triton.unique_kernel_names = False
-                torch._inductor.config.fx_graph_cache = True
-                logger.info("Enabled PyTorch 2.0 inductor optimizations")
+                try:
+                    torch._inductor.config.coordinate_descent_tuning = True
+                    torch._inductor.config.triton.unique_kernel_names = False
+                    torch._inductor.config.fx_graph_cache = True
+                    logger.info("Enabled PyTorch 2.0 inductor optimizations")
+                except AttributeError:
+                    logger.debug("Some PyTorch 2.0 inductor options not available")
 
         except ImportError:
-            logger.warning("psutil not installed. Install with: pip install psutil")
+            logger.warning("Some optimization modules not available")
             # Set basic thread settings
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            torch.set_num_threads(cpu_count)
             torch.set_num_threads(os.cpu_count() if hasattr(os, 'cpu_count') else 4)
         except Exception as e:
             logger.warning(f"Error configuring CPU optimizations: {e}")
@@ -466,7 +474,7 @@ class TextCNN(nn.Module):
         if seq_len < max_k:
             pad_len = max_k - seq_len
             x = F.pad(x, (0, pad_len), "constant", 0)
-        
+
         pooled = []
         for conv in self.convs:
             conv_out = F.relu(conv(x))  # (batch, f, seq_len - k + 1)
@@ -539,13 +547,14 @@ class EnhancedChappie(nn.Module):
             # Configure PyTorch to suppress compilation errors
             try:
                 import torch._dynamo
-                torch._dynamo.config.suppress_errors = True
-                # Set optimization level for better performance
-                torch._dynamo.config.optimize_ddp = True
-                # Increase cache size for better performance with repeated operations
-                torch._dynamo.config.cache_size_limit = 512
-                logger.info("Configured PyTorch to suppress compilation errors and fall back to eager mode")
-            except ImportError:
+                if hasattr(torch._dynamo, 'config'):
+                    torch._dynamo.config.suppress_errors = True
+                    # Set optimization level for better performance
+                    torch._dynamo.config.optimize_ddp = True
+                    # Increase cache size for better performance with repeated operations
+                    torch._dynamo.config.cache_size_limit = 512
+                    logger.info("Configured PyTorch to suppress compilation errors and fall back to eager mode")
+            except (ImportError, AttributeError):
                 logger.warning("Could not configure error suppression for torch.compile")
 
         # Try to compile the model
@@ -558,25 +567,14 @@ class EnhancedChappie(nn.Module):
             # Set backend based on device for better performance
             backend = "inductor"  # Default to inductor as it's the most optimized
 
-            # Compile the forward method directly for better performance
+            # Try to compile the entire model first for best performance
             if hasattr(torch, 'compile'):
                 try:
-                    # Try to compile the entire model first for best performance
-                    self_compiled = torch.compile(
-                        self,
-                        mode=compile_mode,
-                        fullgraph=fullgraph,
-                        backend=backend
-                    )
-                    # If successful, replace self with compiled version
-                    # This is a trick to compile the entire model
-                    for name, param in self_compiled.named_parameters():
-                        if name in dict(self.named_parameters()):
-                            dict(self.named_parameters())[name].data = param.data
-                    logger.info("Successfully compiled entire model")
-                    return
+                    # Note: We can't easily replace self with compiled version
+                    # So we'll just do component-wise compilation
+                    logger.info("Starting component-wise compilation")
                 except Exception as e:
-                    logger.warning(f"Failed to compile entire model: {e}")
+                    logger.warning(f"Error setting up compilation: {e}")
                     logger.info("Falling back to component-wise compilation")
 
             # Component-wise compilation as fallback
@@ -637,23 +635,34 @@ class EnhancedChappie(nn.Module):
 
         return x
 
-    def forward(self, input_ids, attention_mask, labels=None, sentence=None, label=None) -> Dict[str, Any]:
+    def forward(self, input_ids=None, attention_mask=None, labels=None, sentence=None, label=None, **kwargs) -> Dict[str, Any]:
         """Forward pass through the model with optimized execution."""
-        # Ensure inputs are on the correct device
+        # Handle alternative field names from datasets
         if sentence is not None and input_ids is None:
             input_ids = sentence
-        
+        if label is not None and labels is None:
+            labels = label
+
+        # Validate required inputs
+        if input_ids is None:
+            raise ValueError("input_ids is required but not provided")
+        if attention_mask is None:
+            # Create default attention mask if not provided
+            attention_mask = torch.ones_like(input_ids)
+
+        # Ensure inputs are on the correct device
         input_ids = self._ensure_tensor_device(input_ids)
         attention_mask = self._ensure_tensor_device(attention_mask)
         labels = self._ensure_tensor_device(labels)
 
-        # Use torch.amp.autocast for mixed precision if on CUDA
+        # Use torch.autocast for mixed precision if on CUDA
         # This significantly speeds up computation on GPU
-        context_manager = (
-            torch.amp.autocast(device_type=self.device.type)
-            if hasattr(torch, 'amp') and self.device.type in ['cuda', 'cpu']
-            else torch.no_grad()
-        )
+        if hasattr(torch, 'autocast') and self.device.type == 'cuda':
+            context_manager = torch.autocast(device_type='cuda')
+        elif hasattr(torch, 'cpu') and hasattr(torch.cpu, 'amp') and hasattr(torch.cpu.amp, 'autocast') and self.device.type == 'cpu':
+            context_manager = torch.cpu.amp.autocast()
+        else:
+            context_manager = torch.no_grad()
 
         with context_manager:
             # 1) Extract hidden states from backbone model
@@ -703,14 +712,14 @@ class EnhancedChappie(nn.Module):
             if labels is not None:
                 loss = F.cross_entropy(logits, labels)
 
-        # Return results
-        return {
-            'loss': loss,
-            'logits': logits,
-            'decisions': decisions,
-            'routing_weights': routing,
-            'memory_context': mem
-        }
+            # Return results
+            return {
+                'loss': loss,
+                'logits': logits,
+                'decisions': decisions,
+                'routing_weights': routing,
+                'memory_context': mem
+            }
 
     def save_pretrained(self, output_dir: str):
         """Save model to the specified directory."""

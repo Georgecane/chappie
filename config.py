@@ -42,7 +42,7 @@ class ModelConfig:
         if torch.cuda.is_available():
             try:
                 # Get CUDA version
-                cuda_version = torch.version.cuda
+                cuda_version = getattr(torch.version, 'cuda', 'Unknown') if hasattr(torch, 'version') else 'Unknown'
                 logger.info(f"CUDA version: {cuda_version}")
 
                 # Get GPU information
@@ -378,4 +378,3 @@ class ChappieConfig:
 def get_default_config() -> ChappieConfig:
     """Get default configuration."""
     return ChappieConfig()
-
