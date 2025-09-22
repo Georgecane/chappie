@@ -393,8 +393,11 @@ def main(config_path=None):
     # Validate configuration
     config.validate()
 
-    # Set environment variables
-    os.environ['HF_DATASETS_OFFLINE'] = '1'
+    # Respect existing offline/online setting for datasets
+    if 'HF_DATASETS_OFFLINE' in os.environ:
+        logger.info(f"HF_DATASETS_OFFLINE={os.environ['HF_DATASETS_OFFLINE']}")
+    else:
+        logger.info("HF_DATASETS_OFFLINE not set; using online mode if network is available")
 
     # Determine device
     device = get_device()
