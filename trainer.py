@@ -108,7 +108,7 @@ def train_with_amp(model, train_dataloader, eval_dataloader, config, device):
     # Setup gradient scaler for mixed precision training
     use_amp = config.training.fp16 and torch.cuda.is_available()
     device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
-    scaler = GradScaler(device_type) if use_amp else None
+    scaler = GradScaler() if use_amp else None
 
     # Calculate total training steps
     num_epochs = config.training.num_train_epochs

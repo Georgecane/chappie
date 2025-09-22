@@ -383,8 +383,8 @@ def test_mixed_precision(batch_size=4, seq_length=32, num_iterations=10, optimiz
         logger.info(f"Mixed precision performance test successful!")
         logger.info(f"Total time: {elapsed_time:.4f} seconds for {num_iterations} iterations")
         logger.info(f"Training speed: {iterations_per_second:.2f} iterations/second ({ms_per_iteration:.2f} ms/iteration)")
-        if outputs is not None and outputs.loss is not None:
-            logger.info(f"Final loss: {outputs.loss.item():.4f}")
+        if outputs is not None and outputs.get('loss') is not None:
+            logger.info(f"Final loss: {outputs['loss'].item():.4f}")
 
         # Compare with FP32 performance (single iteration)
         logger.info("Running single FP32 iteration for comparison...")

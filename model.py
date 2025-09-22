@@ -6,6 +6,7 @@ from transformers import AutoModel, AutoConfig
 from typing import Dict, Any
 import logging
 import os
+from contextlib import nullcontext
 
 logger = logging.getLogger(__name__)
 
@@ -666,7 +667,8 @@ class EnhancedChappie(nn.Module):
         elif hasattr(torch.amp, 'autocast_mode') and self.device.type == 'cpu':
             context_manager = torch.amp.autocast_mode.autocast(device_type='cpu')
         else:
-            context_manager = torch.no_grad()
+            # Use a no-op context to preserve gradient computation when autocast isn't used
+            context_manager = nullcontext()
 
         with context_manager:
             # 1) Extract hidden states from backbone model
