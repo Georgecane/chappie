@@ -353,9 +353,8 @@ class NeuralMemoryBank(nn.Module):
         nn.init.xavier_uniform_(memory)
         self.memory = nn.Parameter(memory)
 
-        # Use instance normalization for faster computation compared to LayerNorm
-        # This is more efficient for memory operations
-        self.norm = nn.InstanceNorm1d(hidden_size)
+        # Normalize memory slots; LayerNorm over hidden dimension is stable for 2D tensors
+        self.norm = nn.LayerNorm(hidden_size)
 
         # Optimize attention mechanism with fused operations
         # Use a single projection matrix instead of separate query/key projections
@@ -447,8 +446,8 @@ class NeuralMemoryBank(nn.Module):
                 new_mem = torch.empty_like(self.memory)
                 new_mem.copy_(self.memory * (1 - update_weights) + expanded_avg * update_weights)
 
-                # Apply normalization - more efficient than LayerNorm
-                new_mem = self.norm(new_mem.t()).t()  # Transpose for InstanceNorm1d
+                # Apply normalization across hidden dimension per slot
+                new_mem = self.norm(new_mem)
 
                 # In distributed training, synchronize memory updates
                 if self.distributed and torch.distributed.is_initialized():
