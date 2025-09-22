@@ -240,17 +240,33 @@ def move_to_device(tensor_or_module, device):
 class EnhancedStateEncoder(nn.Module):
     def __init__(self, input_size: int, state_size: int):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_size, state_size * 2),
+        self.proj_in = nn.Linear(input_size, state_size * 2)
+        self.norm_in = nn.LayerNorm(state_size * 2)
+        self.act = nn.GELU()
+        self.proj_out = nn.Linear(state_size * 2, state_size)
+        self.drop = nn.Dropout(0.1)
+        # Lightweight residual block
+        self.residual = nn.Sequential(
+            nn.Linear(state_size, state_size),
             nn.GELU(),
-            nn.LayerNorm(state_size * 2),
-            nn.Linear(state_size * 2, state_size),
-            nn.Dropout(0.1)
+            nn.LayerNorm(state_size)
         )
+        # Optional adapters (self-tuning); injected by parent when enabled
+        self.adapter_down = None
+        self.adapter_up = None
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch, seq_len, input_size)
-        # apply per token
-        return self.encoder(x)
+        h = self.proj_in(x)
+        h = self.act(self.norm_in(h))
+        h = self.proj_out(h)
+        h = self.drop(h)
+        # residual
+        r = self.residual(h)
+        h = h + r
+        # adapters if present
+        if self.adapter_down is not None and self.adapter_up is not None:
+            h = h + self.adapter_up(F.gelu(self.adapter_down(h)))
+        return h
 
 class DynamicEmotionProcessor(nn.Module):
     def __init__(self, input_size: int, num_emotions: int):
@@ -273,13 +289,58 @@ class HierarchicalSelfReflection(nn.Module):
             nn.MultiheadAttention(hidden_size, num_heads=8, batch_first=True)
             for _ in range(num_layers)
         ])
-        self.norms = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_layers)])
+        self.ffns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_size, hidden_size * 4),
+                nn.GELU(),
+                nn.Linear(hidden_size * 4, hidden_size)
+            ) for _ in range(num_layers)
+        ])
+        self.norm1 = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_layers)])
+        self.norm2 = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(num_layers)])
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for attn, norm in zip(self.layers, self.norms):
+        for i, attn in enumerate(self.layers):
             res = x
             x, _ = attn(x, x, x)
-            x = norm(res + x)
+            x = self.norm1[i](res + x)
+            # FFN with residual
+            res2 = x
+            x = self.ffns[i](x)
+            x = self.norm2[i](res2 + x)
         return x
+
+class EmotionalPredictionSynthesizer(nn.Module):
+    def __init__(self, hidden_size: int, eps_hidden: int, num_heads: int, num_emotions: int):
+        super().__init__()
+        # Cross-attend state/emotion/memory signals to predict emotional tone
+        self.query_proj = nn.Linear(hidden_size, eps_hidden)
+        self.key_proj = nn.Linear(hidden_size, eps_hidden)
+        self.value_proj = nn.Linear(hidden_size, eps_hidden)
+        self.attn = nn.MultiheadAttention(eps_hidden, num_heads=num_heads, batch_first=True)
+        self.ffn = nn.Sequential(
+            nn.Linear(eps_hidden, eps_hidden * 2),
+            nn.GELU(),
+            nn.Linear(eps_hidden * 2, eps_hidden)
+        )
+        self.norm1 = nn.LayerNorm(eps_hidden)
+        self.norm2 = nn.LayerNorm(eps_hidden)
+        self.emotion_head = nn.Linear(eps_hidden, num_emotions)
+    def forward(self, state_seq: torch.Tensor, emo_seq: torch.Tensor, mem_ctx: torch.Tensor) -> torch.Tensor:
+        # state_seq, emo_seq: (batch, seq, d), mem_ctx: (batch, d)
+        # Build a context sequence: [mean(state), mean(emo), mem]
+        state_mean = state_seq.mean(dim=1, keepdim=True)
+        emo_mean = emo_seq.mean(dim=1, keepdim=True)
+        mem_seq = mem_ctx.unsqueeze(1)
+        ctx = torch.cat([state_mean, emo_mean, mem_seq], dim=1)  # (batch, 3, d)
+        q = self.query_proj(ctx)
+        k = self.key_proj(ctx)
+        v = self.value_proj(ctx)
+        attn_out, _ = self.attn(q, k, v)
+        x = self.norm1(q + attn_out)
+        x = self.norm2(x + self.ffn(x))
+        # Pool and predict emotion distribution
+        pooled = x.mean(dim=1)
+        return self.emotion_head(pooled)
 
 class NeuralMemoryBank(nn.Module):
     def __init__(self, hidden_size: int, memory_size: int = 512):
@@ -513,8 +574,25 @@ class EnhancedChappie(nn.Module):
         self.reflect = HierarchicalSelfReflection(hidden_size, reflect_layers)
         self.memory = NeuralMemoryBank(hidden_size, memory_size)
 
+        # Optional adapter injection for state encoder
+        if self.config.get('use_adapters', True):
+            reduction = max(1, int(state_size // max(2, self.config.get('adapter_reduction', 16))))
+            self.state_enc.adapter_down = nn.Linear(state_size, reduction)
+            self.state_enc.adapter_up = nn.Linear(reduction, state_size)
+
+        # Emotional Prediction Synthesizer (EPS)
+        self.use_eps = self.config.get('use_eps', True)
+        if self.use_eps:
+            self.eps = EmotionalPredictionSynthesizer(
+                hidden_size=hidden_size,
+                eps_hidden=self.config.get('eps_hidden_size', 128),
+                num_heads=self.config.get('eps_num_heads', 4),
+                num_emotions=num_emotions
+            )
+
         # Calculate combined input size for decision engine
-        self.decision_input_size = hidden_size + state_size + num_emotions
+        eps_out = num_emotions if self.use_eps else 0
+        self.decision_input_size = hidden_size + state_size + num_emotions + eps_out
         self.decision = DecisionEngine(self.decision_input_size, num_decisions)
 
         # Initialize CNN for classification
@@ -707,6 +785,16 @@ class EnhancedChappie(nn.Module):
             offset += state_mean.size(1)
             combined_input[:, offset:] = emo_mean
 
+            # EPS prediction
+            eps_pred = None
+            if self.use_eps:
+                eps_pred = self.eps(state, emo, mem)
+
+            # If EPS is used, extend combined input
+            if eps_pred is not None:
+                # Extend combined_input to include eps_pred
+                combined_input = torch.cat([combined_input, eps_pred], dim=1)
+
             # 4) Generate decisions
             decisions, routing = self.decision(combined_input)
 
@@ -724,7 +812,8 @@ class EnhancedChappie(nn.Module):
                 'logits': logits,
                 'decisions': decisions,
                 'routing_weights': routing,
-                'memory_context': mem
+                'memory_context': mem,
+                'eps_prediction': eps_pred
             }
 
     def save_pretrained(self, output_dir: str):

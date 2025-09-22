@@ -14,6 +14,13 @@ cnn_kernels: [3, 4]  # Reduced from [3, 4, 5]
 compile_model: false  # Disabled to save memory and avoid Python 3.13 issues
 compile_mode: "default"
 suppress_compile_errors: true
+# Architectural options - tuned for low VRAM
+use_eps: true
+eps_hidden_size: 64
+eps_num_heads: 2
+use_adapters: true
+adapter_reduction: 16
+use_residual_reflection: true
 
 # Training configuration - optimized for GTX 1650
 output_dir: "./out"

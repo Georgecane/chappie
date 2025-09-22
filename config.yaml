@@ -11,6 +11,13 @@ cnn_kernels: [3, 4, 5]
 compile_model: true
 compile_mode: "max-autotune"
 suppress_compile_errors: true  # Fall back to eager mode if compilation fails
+# Architectural options
+use_eps: true
+eps_hidden_size: 128
+eps_num_heads: 4
+use_adapters: true
+adapter_reduction: 16
+use_residual_reflection: true
 
 # Training configuration
 output_dir: "./out"

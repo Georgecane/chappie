@@ -26,6 +26,13 @@ class ModelConfig:
     compile_model: bool = False
     compile_mode: str = "default"  # Options: default, reduce-overhead, max-autotune
     suppress_compile_errors: bool = True  # Whether to suppress compilation errors and fall back to eager mode
+    # Architectural options
+    use_eps: bool = True
+    eps_hidden_size: int = 128
+    eps_num_heads: int = 4
+    use_adapters: bool = True
+    adapter_reduction: int = 16
+    use_residual_reflection: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary."""
